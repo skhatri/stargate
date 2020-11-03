@@ -15,12 +15,12 @@
  */
 package io.stargate.graphql.schema.fetchers.ddl;
 
-import com.datastax.oss.driver.api.core.CqlIdentifier;
-import com.datastax.oss.driver.api.querybuilder.SchemaBuilder;
-import com.datastax.oss.driver.api.querybuilder.schema.CreateKeyspaceStart;
 import graphql.schema.DataFetchingEnvironment;
 import io.stargate.auth.AuthenticationService;
 import io.stargate.db.Persistence;
+import io.stargate.db.query.Query;
+import io.stargate.db.query.builder.QueryBuilder;
+import io.stargate.db.query.builder.Replication;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,15 +33,11 @@ public class CreateKeyspaceFetcher extends DdlQueryFetcher {
   }
 
   @Override
-  public String getQuery(DataFetchingEnvironment dataFetchingEnvironment) {
-    CreateKeyspaceStart start =
-        SchemaBuilder.createKeyspace(
-            CqlIdentifier.fromInternal(dataFetchingEnvironment.getArgument("name")));
+  protected Query<?> buildQuery(
+      DataFetchingEnvironment dataFetchingEnvironment, QueryBuilder builder) {
+    String keyspaceName = dataFetchingEnvironment.getArgument("name");
     boolean ifNotExists =
         dataFetchingEnvironment.getArgumentOrDefault("ifNotExists", Boolean.FALSE);
-    if (ifNotExists) {
-      start = start.ifNotExists();
-    }
     Integer replicas = dataFetchingEnvironment.getArgument("replicas");
     List<Map<String, Object>> datacenters = dataFetchingEnvironment.getArgument("datacenters");
     if (replicas == null && datacenters == null) {
@@ -50,12 +46,16 @@ public class CreateKeyspaceFetcher extends DdlQueryFetcher {
     if (replicas != null && datacenters != null) {
       throw new IllegalArgumentException("You can't specify both replicas and datacenters");
     }
-
-    if (replicas != null) {
-      return start.withSimpleStrategy(replicas).asCql();
-    } else { // datacenters != null
-      return start.withNetworkTopologyStrategy(parseDatacenters(datacenters)).asCql();
-    }
+    Replication replication =
+        replicas != null
+            ? Replication.simpleStrategy(replicas)
+            : Replication.networkTopologyStrategy(parseDatacenters(datacenters));
+    return builder
+        .create()
+        .keyspace(keyspaceName)
+        .ifNotExists(ifNotExists)
+        .withReplication(replication)
+        .build();
   }
 
   private Map<String, Integer> parseDatacenters(List<Map<String, Object>> datacenters) {

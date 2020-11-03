@@ -15,13 +15,15 @@
  */
 package io.stargate.graphql.schema.fetchers.ddl;
 
-import com.datastax.oss.driver.api.core.CqlIdentifier;
-import com.datastax.oss.driver.api.querybuilder.SchemaBuilder;
-import com.datastax.oss.driver.api.querybuilder.schema.CreateType;
-import com.datastax.oss.driver.api.querybuilder.schema.CreateTypeStart;
 import graphql.schema.DataFetchingEnvironment;
 import io.stargate.auth.AuthenticationService;
 import io.stargate.db.Persistence;
+import io.stargate.db.query.Query;
+import io.stargate.db.query.builder.QueryBuilder;
+import io.stargate.db.schema.Column;
+import io.stargate.db.schema.ImmutableUserDefinedType;
+import io.stargate.db.schema.UserDefinedType;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -32,27 +34,30 @@ public class CreateTypeFetcher extends DdlQueryFetcher {
   }
 
   @Override
-  String getQuery(DataFetchingEnvironment dataFetchingEnvironment) {
-    CreateTypeStart start =
-        SchemaBuilder.createType(
-            CqlIdentifier.fromInternal(dataFetchingEnvironment.getArgument("keyspaceName")),
-            CqlIdentifier.fromInternal(dataFetchingEnvironment.getArgument("typeName")));
-    Boolean ifNotExists = dataFetchingEnvironment.getArgument("ifNotExists");
-    if (ifNotExists != null && ifNotExists) {
-      start = start.ifNotExists();
-    }
-    CreateType createType = null;
-    List<Map<String, Object>> field = dataFetchingEnvironment.getArgument("fields");
-    if (field.isEmpty()) {
+  protected Query<?> buildQuery(
+      DataFetchingEnvironment dataFetchingEnvironment, QueryBuilder builder) {
+
+    List<Map<String, Object>> fieldList = dataFetchingEnvironment.getArgument("fields");
+    if (fieldList.isEmpty()) {
       throw new IllegalArgumentException("Must have at least one field");
     }
-    for (Map<String, Object> key : field) {
-      createType =
-          (createType == null ? start : createType)
-              .withField(
-                  CqlIdentifier.fromInternal((String) key.get("name")),
-                  decodeType(key.get("type")));
+    List<Column> fields = new ArrayList<>(fieldList.size());
+    for (Map<String, Object> key : fieldList) {
+      fields.add(Column.create((String) key.get("name"), decodeType(key.get("type"))));
     }
-    return createType.asCql();
+    String keyspaceName = dataFetchingEnvironment.getArgument("keyspaceName");
+    UserDefinedType udt =
+        ImmutableUserDefinedType.builder()
+            .keyspace(keyspaceName)
+            .name(dataFetchingEnvironment.getArgument("typeName"))
+            .addAllColumns(fields)
+            .build();
+
+    Boolean ifNotExists = dataFetchingEnvironment.getArgument("ifNotExists");
+    return builder
+        .create()
+        .type(keyspaceName, udt)
+        .ifNotExists(ifNotExists != null && ifNotExists)
+        .build();
   }
 }

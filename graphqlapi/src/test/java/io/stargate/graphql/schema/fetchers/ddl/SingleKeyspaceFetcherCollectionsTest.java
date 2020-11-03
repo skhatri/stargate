@@ -2,8 +2,9 @@ package io.stargate.graphql.schema.fetchers.ddl;
 
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
-import io.stargate.db.schema.Keyspace;
+import io.stargate.db.schema.Schema;
 import io.stargate.graphql.schema.SampleKeyspaces;
+import java.util.Collections;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -12,8 +13,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 public class SingleKeyspaceFetcherCollectionsTest extends KeyspaceFetcherTestBase {
 
   @Override
-  public Keyspace getKeyspace() {
-    return SampleKeyspaces.COLLECTIONS;
+  public Schema getCQLSchema() {
+    return Schema.create(Collections.singleton(SampleKeyspaces.COLLECTIONS));
   }
 
   @ParameterizedTest

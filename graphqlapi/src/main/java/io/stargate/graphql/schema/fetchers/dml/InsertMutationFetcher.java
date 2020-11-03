@@ -15,19 +15,18 @@
  */
 package io.stargate.graphql.schema.fetchers.dml;
 
-import com.datastax.oss.driver.api.core.CqlIdentifier;
-import com.datastax.oss.driver.api.querybuilder.QueryBuilder;
-import com.datastax.oss.driver.api.querybuilder.insert.Insert;
-import com.datastax.oss.driver.api.querybuilder.term.Term;
 import com.google.common.base.Preconditions;
 import graphql.schema.DataFetchingEnvironment;
 import io.stargate.auth.AuthenticationService;
 import io.stargate.db.Persistence;
 import io.stargate.db.datastore.DataStore;
+import io.stargate.db.query.BoundQuery;
+import io.stargate.db.query.builder.ValueModifier;
 import io.stargate.db.schema.Column;
 import io.stargate.db.schema.Table;
 import io.stargate.graphql.schema.NameMapping;
-import java.util.LinkedHashMap;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 public class InsertMutationFetcher extends MutationFetcher {
@@ -41,34 +40,31 @@ public class InsertMutationFetcher extends MutationFetcher {
   }
 
   @Override
-  protected String buildStatement(DataFetchingEnvironment environment, DataStore dataStore) {
-    Insert insert =
-        QueryBuilder.insertInto(keyspaceId, tableId).valuesByIds(buildInsertValues(environment));
+  protected BoundQuery buildQuery(DataFetchingEnvironment environment, DataStore dataStore) {
+    boolean ifNotExists =
+        environment.containsArgument("ifNotExists")
+            && environment.getArgument("ifNotExists") != null
+            && (Boolean) environment.getArgument("ifNotExists");
 
-    if (environment.containsArgument("ifNotExists")
-        && environment.getArgument("ifNotExists") != null
-        && (Boolean) environment.getArgument("ifNotExists")) {
-      insert = insert.ifNotExists();
-    }
-    if (environment.containsArgument("options") && environment.getArgument("options") != null) {
-      Map<String, Object> options = environment.getArgument("options");
-      if (options.containsKey("ttl") && options.get("ttl") != null) {
-        insert = insert.usingTtl((Integer) options.get("ttl"));
-      }
-    }
-
-    return insert.asCql();
+    return dataStore
+        .queryBuilder()
+        .insertInto(table.keyspace(), table.name())
+        .value(buildInsertValues(environment))
+        .ifNotExists(ifNotExists)
+        .ttl(getTTL(environment))
+        .build()
+        .bind();
   }
 
-  private Map<CqlIdentifier, Term> buildInsertValues(DataFetchingEnvironment environment) {
+  private List<ValueModifier> buildInsertValues(DataFetchingEnvironment environment) {
     Map<String, Object> value = environment.getArgument("value");
     Preconditions.checkNotNull(value, "Insert statement must contain at least one field");
 
-    Map<CqlIdentifier, Term> insertMap = new LinkedHashMap<>();
+    List<ValueModifier> modifiers = new ArrayList<>();
     for (Map.Entry<String, Object> entry : value.entrySet()) {
       Column column = getColumn(table, entry.getKey());
-      insertMap.put(CqlIdentifier.fromInternal(column.name()), toCqlTerm(column, entry.getValue()));
+      modifiers.add(ValueModifier.set(column.name(), toDBValue(column, entry.getValue())));
     }
-    return insertMap;
+    return modifiers;
   }
 }

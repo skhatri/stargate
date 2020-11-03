@@ -18,9 +18,12 @@ package io.stargate.web.resources;
 import com.codahale.metrics.annotation.Timed;
 import io.stargate.db.datastore.DataStore;
 import io.stargate.db.datastore.ResultSet;
-import io.stargate.db.datastore.query.Value;
-import io.stargate.db.datastore.query.Where;
+import io.stargate.db.query.Predicate;
+import io.stargate.db.query.builder.BuiltCondition;
+import io.stargate.db.query.builder.ColumnOrder;
+import io.stargate.db.query.builder.ValueModifier;
 import io.stargate.db.schema.Column;
+import io.stargate.db.schema.Column.Order;
 import io.stargate.db.schema.Table;
 import io.stargate.web.models.Error;
 import io.stargate.web.models.Filter;
@@ -45,7 +48,6 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import javax.inject.Inject;
@@ -124,13 +126,14 @@ public class RowResource {
 
           final ResultSet r =
               localDB
-                  .query()
+                  .queryBuilder()
                   .select()
                   .from(keyspaceName, tableName)
                   .where(
                       buildWhereClause(localDB, keyspaceName, tableName, request.getRequestURI()))
-                  .consistencyLevel(ConsistencyLevel.LOCAL_QUORUM)
-                  .execute();
+                  .build()
+                  .execute(ConsistencyLevel.LOCAL_QUORUM)
+                  .get();
 
           final List<Map<String, Object>> rows =
               r.rows().stream().map(Converters::row2Map).collect(Collectors.toList());
@@ -190,11 +193,12 @@ public class RowResource {
 
           final ResultSet r =
               localDB
-                  .query()
+                  .queryBuilder()
                   .select()
                   .from(keyspaceName, tableName)
-                  .consistencyLevel(ConsistencyLevel.LOCAL_QUORUM)
-                  .execute();
+                  .build()
+                  .execute(ConsistencyLevel.LOCAL_QUORUM)
+                  .get();
 
           final List<Map<String, Object>> rows =
               r.currentPageRows().stream().map(Converters::row2Map).collect(Collectors.toList());
@@ -256,12 +260,12 @@ public class RowResource {
 
           final Table tableMetadata = db.getTable(localDB, keyspaceName, tableName);
 
-          String returnColumns = "*";
+          List<Column> selectedColumns = Collections.emptyList();
           if (queryModel.getColumnNames() != null && queryModel.getColumnNames().size() != 0) {
-            returnColumns =
+            selectedColumns =
                 queryModel.getColumnNames().stream()
-                    .map(Converters::maybeQuote)
-                    .collect(Collectors.joining(","));
+                    .map(Column::reference)
+                    .collect(Collectors.toList());
           }
 
           if (queryModel.getFilters() == null || queryModel.getFilters().size() == 0) {
@@ -270,21 +274,17 @@ public class RowResource {
                 .build();
           }
 
-          List<Object> values = new ArrayList<>();
           for (Filter filter : queryModel.getFilters()) {
             if (!validateFilter(filter)) {
               return Response.status(Response.Status.BAD_REQUEST)
                   .entity(new Error("filter requires column name, operator, and value"))
                   .build();
             }
-
-            for (Object obj : filter.getValue()) {
-              values.add(filterToValue(obj, filter.getColumnName(), tableMetadata));
-            }
           }
-          String expression = buildExpressionFromOperators(queryModel.getFilters());
+          List<BuiltCondition> where =
+              buildWhereFromOperators(tableMetadata, queryModel.getFilters());
 
-          String orderByExpression = "";
+          List<ColumnOrder> orderBy = new ArrayList<>();
           if (queryModel.getOrderBy() != null) {
             String name = queryModel.getOrderBy().getColumn();
             String direction = queryModel.getOrderBy().getOrder();
@@ -300,18 +300,20 @@ public class RowResource {
                   .entity(new Error("order must be either 'asc' or 'desc'"))
                   .build();
             }
-
-            orderByExpression = "ORDER BY " + name + " " + direction;
+            orderBy.add(ColumnOrder.of(name, Order.valueOf(direction)));
           }
 
-          String query =
-              String.format(
-                  "SELECT %s FROM %s.%s WHERE %s %s",
-                  returnColumns, keyspaceName, tableName, expression, orderByExpression);
-          CompletableFuture<ResultSet> selectQuery =
-              localDB.query(query.trim(), ConsistencyLevel.LOCAL_QUORUM, values.toArray());
-
-          ResultSet r = selectQuery.get();
+          ResultSet r =
+              localDB
+                  .queryBuilder()
+                  .select()
+                  .column(selectedColumns)
+                  .from(keyspaceName, tableName)
+                  .where(where)
+                  .orderBy(orderBy)
+                  .build()
+                  .execute(ConsistencyLevel.LOCAL_QUORUM)
+                  .get();
           final List<Map<String, Object>> rows =
               r.currentPageRows().stream().map(Converters::row2Map).collect(Collectors.toList());
 
@@ -360,7 +362,7 @@ public class RowResource {
         () -> {
           DataStore localDB = db.getDataStoreForToken(token);
 
-          List<Value<?>> values =
+          List<ValueModifier> values =
               rowAdd.getColumns().stream()
                   .map(
                       (c) ->
@@ -370,11 +372,12 @@ public class RowResource {
                               db.getTable(localDB, keyspaceName, tableName)))
                   .collect(Collectors.toList());
           localDB
-              .query()
+              .queryBuilder()
               .insertInto(keyspaceName, tableName)
               .value(values)
-              .consistencyLevel(ConsistencyLevel.LOCAL_QUORUM)
-              .execute();
+              .build()
+              .execute(ConsistencyLevel.LOCAL_QUORUM)
+              .get();
 
           return Response.status(Response.Status.CREATED).entity(new RowsResponse(true, 1)).build();
         });
@@ -417,12 +420,13 @@ public class RowResource {
           DataStore localDB = db.getDataStoreForToken(token);
 
           localDB
-              .query()
+              .queryBuilder()
               .delete()
               .from(keyspaceName, tableName)
               .where(buildWhereClause(localDB, keyspaceName, tableName, request.getRequestURI()))
-              .consistencyLevel(ConsistencyLevel.LOCAL_QUORUM)
-              .execute();
+              .build()
+              .execute(ConsistencyLevel.LOCAL_QUORUM)
+              .get();
 
           return Response.status(Response.Status.NO_CONTENT).entity(new SuccessResponse()).build();
         });
@@ -470,18 +474,19 @@ public class RowResource {
 
           final Table tableMetadata = db.getTable(localDB, keyspaceName, tableName);
 
-          List<Value<?>> changes =
+          List<ValueModifier> changes =
               changeSet.getChangeset().stream()
                   .map((c) -> Converters.colToValue(c.getColumn(), c.getValue(), tableMetadata))
                   .collect(Collectors.toList());
 
           localDB
-              .query()
+              .queryBuilder()
               .update(keyspaceName, tableName)
               .value(changes)
               .where(buildWhereClause(request.getRequestURI(), tableMetadata))
-              .consistencyLevel(ConsistencyLevel.LOCAL_QUORUM)
-              .execute();
+              .build()
+              .execute(ConsistencyLevel.LOCAL_QUORUM)
+              .get();
 
           return Response.status(Response.Status.OK).entity(new SuccessResponse()).build();
         });
@@ -499,47 +504,42 @@ public class RowResource {
     return true;
   }
 
-  private String buildExpressionFromOperators(List<Filter> filters) {
-    StringBuilder expression = new StringBuilder();
+  private List<BuiltCondition> buildWhereFromOperators(Table tableMetadata, List<Filter> filters) {
+    List<BuiltCondition> where = new ArrayList<>();
     for (Filter filter : filters) {
-      if (expression.length() != 0) {
-        expression.append(" AND ");
-      }
-
-      String op = getOp(filter.getOperator());
-      if (op.equals("in")) {
-        String placeholder = String.join("", Collections.nCopies(filter.getValue().size(), "?,"));
-        expression
-            .append(filter.getColumnName())
-            .append(" in (")
-            .append(placeholder, 0, placeholder.length() - 1)
-            .append(")");
+      String columnName = filter.getColumnName();
+      Predicate op = getOp(filter.getOperator());
+      List<Object> filterValue = filter.getValue();
+      Object value;
+      if (op == Predicate.IN) {
+        value =
+            filterValue.stream()
+                .map(v -> filterToValue(v, columnName, tableMetadata))
+                .collect(Collectors.toList());
       } else {
-        expression.append(filter.getColumnName().toLowerCase()).append(" ").append(op).append(" ?");
+        value = filterToValue(filterValue.get(0), columnName, tableMetadata);
       }
+      where.add(BuiltCondition.of(columnName, op, value));
     }
-
-    return expression.toString();
+    return where;
   }
 
-  private String getOp(Filter.Operator operator) {
+  private Predicate getOp(Filter.Operator operator) {
     switch (operator) {
-      case eq:
-        return "=";
       case notEq:
-        return "!=";
+        return Predicate.NEQ;
       case gt:
-        return ">";
+        return Predicate.GT;
       case gte:
-        return ">=";
+        return Predicate.GTE;
       case lt:
-        return "<";
+        return Predicate.LT;
       case lte:
-        return "<=";
+        return Predicate.LTE;
       case in:
-        return "in";
+        return Predicate.IN;
       default:
-        return "=";
+        return Predicate.EQ;
     }
   }
 
@@ -554,12 +554,12 @@ public class RowResource {
     return value;
   }
 
-  private List<Where<?>> buildWhereClause(
+  private List<BuiltCondition> buildWhereClause(
       DataStore localDB, String keyspaceName, String tableName, String path) {
     return buildWhereClause(path, db.getTable(localDB, keyspaceName, tableName));
   }
 
-  private List<Where<?>> buildWhereClause(String path, Table tableMetadata) {
+  private List<BuiltCondition> buildWhereClause(String path, Table tableMetadata) {
     List<String> values = idFromPath(path);
 
     final List<Column> keys = tableMetadata.primaryKeyColumns();

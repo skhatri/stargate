@@ -15,12 +15,12 @@
  */
 package io.stargate.graphql.schema.fetchers.ddl;
 
-import com.datastax.oss.driver.api.core.CqlIdentifier;
-import com.datastax.oss.driver.api.querybuilder.SchemaBuilder;
-import com.datastax.oss.driver.api.querybuilder.schema.Drop;
 import graphql.schema.DataFetchingEnvironment;
 import io.stargate.auth.AuthenticationService;
 import io.stargate.db.Persistence;
+import io.stargate.db.query.Query;
+import io.stargate.db.query.builder.QueryBuilder;
+import io.stargate.db.schema.UserDefinedType;
 
 public class DropTypeFetcher extends DdlQueryFetcher {
 
@@ -29,15 +29,16 @@ public class DropTypeFetcher extends DdlQueryFetcher {
   }
 
   @Override
-  String getQuery(DataFetchingEnvironment dataFetchingEnvironment) {
-    Drop dropType =
-        SchemaBuilder.dropType(
-            CqlIdentifier.fromInternal(dataFetchingEnvironment.getArgument("keyspaceName")),
-            CqlIdentifier.fromInternal(dataFetchingEnvironment.getArgument("typeName")));
+  protected Query<?> buildQuery(
+      DataFetchingEnvironment dataFetchingEnvironment, QueryBuilder builder) {
+
     Boolean ifExists = dataFetchingEnvironment.getArgument("ifExists");
-    if (ifExists != null && ifExists) {
-      dropType = dropType.ifExists();
-    }
-    return dropType.asCql();
+    return builder
+        .drop()
+        .type(
+            dataFetchingEnvironment.getArgument("keyspaceName"),
+            UserDefinedType.reference(dataFetchingEnvironment.getArgument("typeName")))
+        .ifExists(ifExists != null && ifExists)
+        .build();
   }
 }
